@@ -3,14 +3,14 @@
 # ==============================================================================
 # Project: PDFS - PDF Screenshooter
 # Description: CLI tool to clip PDF pages to clipboard or save to file.
-# License: MIT
+# License: GPL
 # ==============================================================================
 
 CONFIG_DIR="$HOME/.config/pdfs"
 SESSION_FILE="$CONFIG_DIR/sessions.txt"
 SETTINGS_FILE="$CONFIG_DIR/settings.conf"
 SAVE_DIR="$HOME/Photos/pdfs"
-VERSION="1.1.1"
+VERSION="1.1.2" # Version updated for Natural Sort
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -82,15 +82,22 @@ process_page() {
 
 work_loop() {
     local target_dir="$1"
-    # Dizin kontrolü (Kritik)
     if [ ! -d "$target_dir" ]; then echo -e "${RED}Dir not found: $target_dir${NC}"; exit 1; fi
     target_dir=$(realpath "$target_dir")
     cd "$target_dir" || exit
 
     while true; do
         echo -e "\n${BLUE}=== Work Dir: $target_dir ===${NC}"
-        files=(); for f in [0-9]*.pdf; do [ -e "$f" ] && echo "  $f" && files+=("$f"); done
-        if [ ${#files[@]} -eq 0 ]; then echo -e "${RED}No numbered PDFs found (filenames must start with digits).${NC}"; exit 1; fi
+        files=()
+        
+        # --- GÜNCELLEME 1: Natural Sort (1, 2, ... 10, 11) ---
+        # find ile bulup sort -V (Version Sort) ile sıralıyoruz.
+        while IFS= read -r f; do
+            echo "  $f"
+            files+=("$f")
+        done < <(find . -maxdepth 1 -name "[0-9]*.pdf" -printf "%f\n" | sort -V)
+
+        if [ ${#files[@]} -eq 0 ]; then echo -e "${RED}No numbered PDFs found.${NC}"; exit 1; fi
 
         echo -e "\n${GREEN}PDF No (Exit: 'q'):${NC}"
         read -p "> " pdf_input
@@ -98,7 +105,14 @@ work_loop() {
 
         selected_file=""
         for f in "${files[@]}"; do
-            if [[ "$f" == "$pdf_input"* ]] || [[ "$f" == "0$pdf_input"* ]]; then selected_file="$f"; break; fi
+            # --- GÜNCELLEME 2: Akıllı Regex Kontrolü ---
+            # ^0?      -> Başında opsiyonel 0 olabilir (01 veya 1)
+            # $pdf_input -> Girilen sayı
+            # ([^0-9]|$) -> Devamında rakam OLMAYACAK (harf, nokta veya satır sonu olacak)
+            if [[ "$f" =~ ^0?${pdf_input}([^0-9]|$) ]]; then
+                selected_file="$f"
+                break
+            fi
         done
 
         if [ -z "$selected_file" ]; then echo -e "${RED}File not found.${NC}"; continue; fi
@@ -118,16 +132,12 @@ work_loop() {
 }
 
 save_session() {
-    # Argümanları birleştir (Boşluklu yollar için)
     local raw_path="$*"
-    
-    # 1. ÖNCE KONTROL (Validasyon)
     if [ ! -d "$raw_path" ]; then
         echo -e "${RED}[ERROR] Directory does not exist: $raw_path${NC}"
         echo -e "${YELLOW}Hint: If path contains '&', wrap it in quotes!${NC}"
         exit 1
     fi
-
     local dir_path=$(realpath "$raw_path")
 
     if grep -q "|$dir_path$" "$SESSION_FILE"; then work_loop "$dir_path"; return; fi
@@ -136,7 +146,6 @@ save_session() {
     for ((i=1; i<=200; i++)); do if ! grep -q "^$i|" "$SESSION_FILE"; then next_id=$i; break; fi; done
     if [ $next_id -eq 0 ]; then echo -e "${RED}Limit reached.${NC}"; exit 1; fi
 
-    # 2. SONRA KAYIT
     echo "$next_id|$dir_path" >> "$SESSION_FILE"
     echo -e "${GREEN}Saved: [$next_id] -> $dir_path${NC}"
     work_loop "$dir_path"
@@ -166,15 +175,14 @@ check_deps
 case "$1" in
     "-d") delete_session ;;
     "-s") 
-        shift # -s bayrağını at
+        shift
         if [ -z "$1" ]; then echo -e "${RED}Path missing.${NC}"; exit 1; fi
-        save_session "$@" # Geri kalan tüm argümanları yol olarak gönder
+        save_session "$@"
         ;;
     "-default") configure_default ;;
     "-h"|"--help") print_help ;;
     "") load_menu ;;
     *) 
-        # Eğer -s yoksa ama argüman varsa, geçici session olarak dene
         if [ -d "$1" ] || [ -d "$*" ]; then 
             if [ -d "$1" ]; then work_loop "$1"; else work_loop "$*"; fi
         else 

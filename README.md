@@ -27,7 +27,4 @@ The tool includes session management to save frequently used directories and aut
 Clone the repository and run the included installer script. This will check for dependencies and install the tool to your system path.
 
 ```bash
-git clone [https://github.com/suleymanov-suleyman/PDFS.git](https://github.com/suleymanov-suleyman/PDFS.git)
-cd PDFS
-chmod +x install.sh  
-./install.sh
+git clone https://github.com/suleymanov-suleyman/PDFS.git && cd PDFS && ./install.sh

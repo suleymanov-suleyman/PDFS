@@ -3,7 +3,7 @@
 # ==============================================================================
 # Project: PDFS - PDF Screenshooter
 # Description: CLI tool to clip PDF pages to clipboard or save to file.
-# License: MIT
+# License: GPL
 # ==============================================================================
 
 CONFIG_DIR="$HOME/.config/pdfs"

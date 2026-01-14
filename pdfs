@@ -3,14 +3,14 @@
 # ==============================================================================
 # Project: PDFS - PDF Screenshooter
 # Description: CLI tool to clip PDF pages to clipboard or save to file.
-# License: GPL
+# License: MIT
 # ==============================================================================
 
 CONFIG_DIR="$HOME/.config/pdfs"
 SESSION_FILE="$CONFIG_DIR/sessions.txt"
 SETTINGS_FILE="$CONFIG_DIR/settings.conf"
 SAVE_DIR="$HOME/Photos/pdfs"
-VERSION="1.1.0"
+VERSION="1.1.1"
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -21,11 +21,7 @@ NC='\033[0m'
 # --- INIT ---
 if [ ! -d "$CONFIG_DIR" ]; then mkdir -p "$CONFIG_DIR"; touch "$SESSION_FILE"; fi
 if [ ! -d "$SAVE_DIR" ]; then mkdir -p "$SAVE_DIR"; fi
-
-# Default setting check
-if [ ! -f "$SETTINGS_FILE" ]; then
-    echo "mode=copy" > "$SETTINGS_FILE"
-fi
+if [ ! -f "$SETTINGS_FILE" ]; then echo "mode=copy" > "$SETTINGS_FILE"; fi
 
 # --- HELPERS ---
 
@@ -45,11 +41,6 @@ print_help() {
     echo "  pdfs -d            : Delete session."
     echo "  pdfs -default      : Configure default action."
     echo "  pdfs -h            : Help."
-    echo ""
-    echo "In-Session Commands:"
-    echo "  [page]             : Use default action."
-    echo "  [page] -s          : Save to ~/Photos/pdfs."
-    echo "  [page] -c          : Copy to clipboard."
 }
 
 configure_default() {
@@ -70,29 +61,20 @@ process_page() {
     local file_path="$1"
     local page_num="$2"
     local flag="$3"
-    
-    # Determine Action
     local action=""
     
-    if [[ "$flag" == "-s" ]]; then
-        action="save"
-    elif [[ "$flag" == "-c" ]]; then
-        action="copy"
-    else
-        # Load default
-        action=$(grep "mode=" "$SETTINGS_FILE" | cut -d'=' -f2)
-    fi
+    if [[ "$flag" == "-s" ]]; then action="save";
+    elif [[ "$flag" == "-c" ]]; then action="copy";
+    else action=$(grep "mode=" "$SETTINGS_FILE" | cut -d'=' -f2); fi
 
     echo -e "${BLUE}[INFO]${NC} Processing page $page_num ($action)..."
 
     if [[ "$action" == "copy" ]]; then
         pdftoppm -png -f "$page_num" -l "$page_num" -r 300 "$file_path" | wl-copy --type image/png
         if [ $? -eq 0 ]; then echo -e "${GREEN}[OK]${NC} Copied to clipboard."; else echo -e "${RED}[ERR]${NC} Copy failed."; fi
-    
     elif [[ "$action" == "save" ]]; then
         local base_name=$(basename "$file_path" .pdf)
         local out_file="$SAVE_DIR/${base_name}_p${page_num}.png"
-        
         pdftoppm -png -f "$page_num" -l "$page_num" -r 300 "$file_path" > "$out_file"
         if [ $? -eq 0 ]; then echo -e "${GREEN}[OK]${NC} Saved: $out_file"; else echo -e "${RED}[ERR]${NC} Save failed."; fi
     fi
@@ -100,6 +82,7 @@ process_page() {
 
 work_loop() {
     local target_dir="$1"
+    # Dizin kontrolü (Kritik)
     if [ ! -d "$target_dir" ]; then echo -e "${RED}Dir not found: $target_dir${NC}"; exit 1; fi
     target_dir=$(realpath "$target_dir")
     cd "$target_dir" || exit
@@ -107,7 +90,7 @@ work_loop() {
     while true; do
         echo -e "\n${BLUE}=== Work Dir: $target_dir ===${NC}"
         files=(); for f in [0-9]*.pdf; do [ -e "$f" ] && echo "  $f" && files+=("$f"); done
-        if [ ${#files[@]} -eq 0 ]; then echo -e "${RED}No numbered PDFs.${NC}"; exit 1; fi
+        if [ ${#files[@]} -eq 0 ]; then echo -e "${RED}No numbered PDFs found (filenames must start with digits).${NC}"; exit 1; fi
 
         echo -e "\n${GREEN}PDF No (Exit: 'q'):${NC}"
         read -p "> " pdf_input
@@ -124,31 +107,36 @@ work_loop() {
         while true; do
             echo -e "Enter Page [Example: 45, 45 -s, 45 -c] ('q' back):"
             read -p "> " input_raw
-            
-            # Split input into array
             read -r -a input_arr <<< "$input_raw"
             page_num="${input_arr[0]}"
             flag="${input_arr[1]}"
 
             [[ "$page_num" == "q" ]] && break
-            
-            if [[ "$page_num" =~ ^[0-9]+$ ]]; then
-                process_page "$selected_file" "$page_num" "$flag"
-            else
-                echo -e "${RED}Invalid number.${NC}"
-            fi
+            if [[ "$page_num" =~ ^[0-9]+$ ]]; then process_page "$selected_file" "$page_num" "$flag"; else echo -e "${RED}Invalid number.${NC}"; fi
         done
     done
 }
 
 save_session() {
-    local dir_path=$(realpath "$1")
+    # Argümanları birleştir (Boşluklu yollar için)
+    local raw_path="$*"
+    
+    # 1. ÖNCE KONTROL (Validasyon)
+    if [ ! -d "$raw_path" ]; then
+        echo -e "${RED}[ERROR] Directory does not exist: $raw_path${NC}"
+        echo -e "${YELLOW}Hint: If path contains '&', wrap it in quotes!${NC}"
+        exit 1
+    fi
+
+    local dir_path=$(realpath "$raw_path")
+
     if grep -q "|$dir_path$" "$SESSION_FILE"; then work_loop "$dir_path"; return; fi
     
     next_id=0
     for ((i=1; i<=200; i++)); do if ! grep -q "^$i|" "$SESSION_FILE"; then next_id=$i; break; fi; done
     if [ $next_id -eq 0 ]; then echo -e "${RED}Limit reached.${NC}"; exit 1; fi
 
+    # 2. SONRA KAYIT
     echo "$next_id|$dir_path" >> "$SESSION_FILE"
     echo -e "${GREEN}Saved: [$next_id] -> $dir_path${NC}"
     work_loop "$dir_path"
@@ -167,8 +155,7 @@ delete_session() {
 }
 
 load_menu() {
-    list_sessions
-    if [ $? -ne 0 ]; then print_help; exit 0; fi
+    list_sessions; if [ $? -ne 0 ]; then print_help; exit 0; fi
     echo -e "\n${GREEN}Select ID:${NC}"; read -p "> " sel
     path=$(grep "^$sel|" "$SESSION_FILE" | cut -d'|' -f2)
     if [ -z "$path" ]; then echo -e "${RED}Invalid.${NC}"; exit 1; else work_loop "$path"; fi
@@ -178,9 +165,20 @@ load_menu() {
 check_deps
 case "$1" in
     "-d") delete_session ;;
-    "-s") [ -z "$2" ] && echo -e "${RED}Path missing.${NC}" && exit 1; save_session "$2" ;;
+    "-s") 
+        shift # -s bayrağını at
+        if [ -z "$1" ]; then echo -e "${RED}Path missing.${NC}"; exit 1; fi
+        save_session "$@" # Geri kalan tüm argümanları yol olarak gönder
+        ;;
     "-default") configure_default ;;
     "-h"|"--help") print_help ;;
     "") load_menu ;;
-    *) [ -d "$1" ] && work_loop "$1" || print_help ;;
+    *) 
+        # Eğer -s yoksa ama argüman varsa, geçici session olarak dene
+        if [ -d "$1" ] || [ -d "$*" ]; then 
+            if [ -d "$1" ]; then work_loop "$1"; else work_loop "$*"; fi
+        else 
+            print_help 
+        fi 
+        ;;
 esac

@@ -128,3 +128,4 @@ case "$1" in
         echo "Usage: pdfs -s <path>"
         ;;
 esac
+

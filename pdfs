@@ -1,10 +1,11 @@
+
 #!/bin/bash
 
 # ==============================================================================
 # Project: PDFS - PDF Screenshooter
 # Description: CLI tool to clip PDF pages to clipboard or save to file.
 # License: GPL
-# Version: 2.0
+# Version: 2.1
 # ==============================================================================
 
 CONFIG_DIR="$HOME/.config/pdfs"
@@ -23,13 +24,120 @@ mkdir -p "$CONFIG_DIR" "$SAVE_DIR"
 touch "$SESSION_FILE"
 [ ! -f "$SETTINGS_FILE" ] && echo "mode=copy" > "$SETTINGS_FILE"
 
-check_deps() {
-    local missing=0
-    command -v pdftoppm &>/dev/null || { echo -e "${RED}Missing: poppler-utils${NC}"; missing=1; }
-    command -v wl-copy &>/dev/null || { echo -e "${RED}Missing: wl-clipboard${NC}"; missing=1; }
-    command -v python3 &>/dev/null || { echo -e "${RED}Missing: python3${NC}"; missing=1; }
-    [ $missing -eq 1 ] && exit 1
+# ------------------------------------------------------------------------------
+# ENV DETECTION
+# ------------------------------------------------------------------------------
+
+detect_session() {
+    if [ -n "$WAYLAND_DISPLAY" ]; then
+        SESSION_TYPE="wayland"
+    else
+        SESSION_TYPE="x11"
+    fi
 }
+
+detect_pkg_manager() {
+    if command -v dnf &>/dev/null; then
+        PKG_MGR="dnf"
+    elif command -v apt &>/dev/null; then
+        PKG_MGR="apt"
+    elif command -v pacman &>/dev/null; then
+        PKG_MGR="pacman"
+    else
+        echo -e "${RED}Unsupported distro${NC}"
+        exit 1
+    fi
+}
+
+install_deps() {
+    detect_session
+    detect_pkg_manager
+
+    DEPS=("poppler-utils" "python3")
+
+    if [ "$SESSION_TYPE" = "wayland" ]; then
+        DEPS+=("wl-clipboard")
+    else
+        DEPS+=("xclip")
+    fi
+
+    echo -e "${BLUE}[INFO]${NC} Installing dependencies (${SESSION_TYPE})..."
+
+    case "$PKG_MGR" in
+        dnf) sudo dnf install -y "${DEPS[@]}" ;;
+        apt) sudo apt update && sudo apt install -y "${DEPS[@]}" ;;
+        pacman) sudo pacman -S --noconfirm "${DEPS[@]}" ;;
+    esac
+}
+
+check_deps() {
+    detect_session
+    command -v pdftoppm &>/dev/null || return 1
+    command -v python3 &>/dev/null || return 1
+
+    if [ "$SESSION_TYPE" = "wayland" ]; then
+        command -v wl-copy &>/dev/null || return 1
+    else
+        command -v xclip &>/dev/null || return 1
+    fi
+    return 0
+}
+
+save_session() {
+  local dir
+    dir="$(realpath "$1")" || exit 1
+
+    grep -q "|$dir$" "$SESSION_FILE" && {
+      echo -e "${YELLOW}Already saved.${NC}"
+        return
+    }
+
+    id=$(( $(cut -d'|' -f1 "$SESSION_FILE" 2>/dev/null | sort -n | tail -1) + 1 ))
+    echo "$id|$dir" >> "$SESSION_FILE"
+    echo -e "${GREEN}[OK]${NC} Saved: $dir"
+}
+
+delete_session() {
+    [ ! -s "$SESSION_FILE" ] && {
+        echo "No sessions."
+        return
+    }
+
+    cat "$SESSION_FILE"
+    echo "Enter ID to delete:"
+    read -p "> " id
+
+    sed -i "/^$id|/d" "$SESSION_FILE"
+    echo -e "${GREEN}[OK]${NC} Deleted session $id"
+}
+
+load_menu() {
+    [ ! -s "$SESSION_FILE" ] && {
+        echo -e "${YELLOW}No saved sessions.${NC}"
+        echo "Use: pdfs -s <dir>"
+        exit 0
+    }
+
+    echo -e "${CYAN}Saved sessions:${NC}"
+    while IFS='|' read -r id path; do
+        printf "${GREEN}[%d]${NC} %s\n" "$id" "$path"
+    done < "$SESSION_FILE"
+
+    echo "Select ID (q=exit):"
+    read -p "> " sel
+    [[ "$sel" == "q" ]] && exit 0
+
+    path=$(grep "^$sel|" "$SESSION_FILE" | cut -d'|' -f2)
+    [ -z "$path" ] && {
+        echo "Invalid selection"
+        exit 1
+    }
+
+    work_loop "$path"
+}
+# ------------------------------------------------------------------------------
+# CORE
+# ------------------------------------------------------------------------------
 
 get_sorted_files() {
 python3 - <<'EOF'
@@ -42,24 +150,27 @@ for f in files:
 EOF
 }
 
+copy_image() {
+    if [ "$SESSION_TYPE" = "wayland" ]; then
+        wl-copy --type image/png
+    else
+        xclip -selection clipboard -t image/png
+    fi
+}
+
 process_page() {
     local file="$1"
     local page="$2"
     local flag="$3"
     local action
 
-    if [[ "$flag" == "-s" ]]; then
-        action="save"
-    elif [[ "$flag" == "-c" ]]; then
-        action="copy"
-    else
-        action=$(cut -d= -f2 "$SETTINGS_FILE")
-    fi
+    action=$(cut -d= -f2 "$SETTINGS_FILE")
+    [[ "$flag" == "-s" ]] && action="save"
+    [[ "$flag" == "-c" ]] && action="copy"
 
-    echo -e "${BLUE}[INFO]${NC} Page $page ($action)"
-
-    if [[ "$action" == "copy" ]]; then
-        pdftoppm -png -f "$page" -l "$page" -r 300 "$file" | wl-copy --type image/png
+    if [ "$action" = "copy" ]; then
+        pdftoppm -png -f "$page" -l "$page" -r 300 "$file" | copy_image
+        echo -e "${GREEN}[OK]${NC} Copied to clipboard"
     else
         base=$(basename "$file" .pdf)
         out="$SAVE_DIR/${base}_p${page}.png"
@@ -69,63 +180,67 @@ process_page() {
 }
 
 work_loop() {
-    local dir="$1"
-
-    [ ! -d "$dir" ] && { echo -e "${RED}Dir not found${NC}"; exit 1; }
-    cd "$(realpath "$dir")" || exit
+    cd "$(realpath "$1")" || exit
 
     while true; do
-        echo -e "\n${BLUE}=== Work Dir: $(pwd) ===${NC}"
-
         mapfile -t pdfs < <(get_sorted_files)
-        [ ${#pdfs[@]} -eq 0 ] && { echo -e "${RED}No PDFs found${NC}"; exit 1; }
+        [ ${#pdfs[@]} -eq 0 ] && { echo -e "${RED}No PDFs found${NC}"; return; }
 
-        echo -e "${CYAN}Available PDFs:${NC}"
+        echo -e "\n${CYAN}Available PDFs:${NC}"
         for i in "${!pdfs[@]}"; do
             printf "${GREEN}[%d]${NC} %s\n" "$((i+1))" "${pdfs[$i]}"
         done
 
-        echo -e "\n${YELLOW}Select PDF number (q=exit):${NC}"
+        echo -e "${YELLOW}Select PDF (q=exit):${NC}"
         read -p "> " sel
-        [[ "$sel" == "q" ]] && exit 0
+        [[ "$sel" == "q" ]] && return
 
-        if [[ "$sel" =~ ^[0-9]+$ ]] && [ "$sel" -ge 1 ] && [ "$sel" -le "${#pdfs[@]}" ]; then
-            selected="${pdfs[$((sel-1))]}"
-        else
-            echo -e "${RED}Invalid selection${NC}"
-            continue
-        fi
-
+        selected="${pdfs[$((sel-1))]}" || continue
         echo -e "${BLUE}Selected:${NC} $selected"
 
         while true; do
-            echo -e "${YELLOW}Enter page number (q=back):${NC}"
+            echo -e "${YELLOW}Enter page (q=back):${NC}"
             read -p "> " raw
             read -r page flag <<< "$raw"
-
             [[ "$page" == "q" ]] && break
-            [[ "$page" =~ ^[0-9]+$ ]] || { echo -e "${RED}Invalid page${NC}"; continue; }
-
+            [[ "$page" =~ ^[0-9]+$ ]] || continue
             process_page "$selected" "$page" "$flag"
         done
     done
 }
 
-check_deps
+# ------------------------------------------------------------------------------
+# MAIN
+# ------------------------------------------------------------------------------
+
+detect_session
+check_deps || echo -e "${YELLOW}[WARN] Missing dependencies. Run install manually.${NC}"
 
 case "$1" in
-    -s) shift; work_loop "$*" ;;
-    -default)
+    "-d")
+        delete_session
+        ;;
+    "-s")
+        shift
+        save_session "$@"
+        ;;
+    "-default")
         echo "1) Copy  2) Save"
         read -p "> " c
-        [ "$c" == "1" ] && echo "mode=copy" > "$SETTINGS_FILE"
-        [ "$c" == "2" ] && echo "mode=save" > "$SETTINGS_FILE"
+        [ "$c" = "1" ] && echo "mode=copy" > "$SETTINGS_FILE"
+        [ "$c" = "2" ] && echo "mode=save" > "$SETTINGS_FILE"
         ;;
-    -h)
-        echo "Usage: pdfs -s <path>"
+    "-h")
+        echo "Usage: pdfs [-s dir] [-d] [-default]"
+        ;;
+    "")
+        load_menu
         ;;
     *)
-        echo "Usage: pdfs -s <path>"
+        if [ -d "$*" ]; then
+            work_loop "$*"
+        else
+            echo -e "${RED}Invalid path.${NC}"
+        fi
         ;;
 esac
-

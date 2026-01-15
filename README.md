@@ -6,7 +6,7 @@ CLI tool to capture PDF pages to clipboard or save as images.
 
 PDFS is a lightweight command-line utility for Linux designed to extract specific pages from PDF files as high-resolution images. It streamlines the workflow of capturing lecture notes or document pages by allowing users to copy them directly to the clipboard or save them to a local directory efficiently.
 
-The tool includes session management to save frequently used directories and automatically detects numbered PDF files for quick access.
+PDFS lists files dynamically with index numbers
 
 ## Features
 

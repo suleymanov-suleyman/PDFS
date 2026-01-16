@@ -1,24 +1,30 @@
 
 #!/bin/bash
+set -euo pipefail
+IFS=$'\n\t'
 
 # ==============================================================================
 # Project: PDFS - PDF Screenshooter
 # Description: CLI tool to clip PDF pages to clipboard or save to file.
 # License: GPL
-# Version: 2.1
+# Version: 2.2
 # ==============================================================================
 
-CONFIG_DIR="$HOME/.config/pdfs"
-SESSION_FILE="$CONFIG_DIR/sessions.txt"
-SETTINGS_FILE="$CONFIG_DIR/settings.conf"
-SAVE_DIR="$HOME/Photos/pdfs"
+# ------------------------------------------------------------------------------
+# CONFIG
+# ------------------------------------------------------------------------------
 
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-BLUE='\033[0;34m'
-YELLOW='\033[1;33m'
-CYAN='\033[0;36m'
-NC='\033[0m'
+readonly CONFIG_DIR="$HOME/.config/pdfs"
+readonly SESSION_FILE="$CONFIG_DIR/sessions.txt"
+readonly SETTINGS_FILE="$CONFIG_DIR/settings.conf"
+readonly SAVE_DIR="$HOME/Photos/pdfs"
+
+readonly RED='\033[0;31m'
+readonly GREEN='\033[0;32m'
+readonly BLUE='\033[0;34m'
+readonly YELLOW='\033[1;33m'
+readonly CYAN='\033[0;36m'
+readonly NC='\033[0m'
 
 mkdir -p "$CONFIG_DIR" "$SAVE_DIR"
 touch "$SESSION_FILE"
@@ -29,7 +35,7 @@ touch "$SESSION_FILE"
 # ------------------------------------------------------------------------------
 
 detect_session() {
-    if [ -n "$WAYLAND_DISPLAY" ]; then
+    if [ -n "${WAYLAND_DISPLAY:-}" ]; then
         SESSION_TYPE="wayland"
     else
         SESSION_TYPE="x11"
@@ -53,15 +59,15 @@ install_deps() {
     detect_session
     detect_pkg_manager
 
-    DEPS=("poppler-utils" "python3")
+    DEPS=(poppler-utils python3)
 
     if [ "$SESSION_TYPE" = "wayland" ]; then
-        DEPS+=("wl-clipboard")
+        DEPS+=(wl-clipboard)
     else
-        DEPS+=("xclip")
+        DEPS+=(xclip)
     fi
 
-    echo -e "${BLUE}[INFO]${NC} Installing dependencies (${SESSION_TYPE})..."
+    echo -e "${BLUE}[INFO]${NC} Installing dependencies..."
 
     case "$PKG_MGR" in
         dnf) sudo dnf install -y "${DEPS[@]}" ;;
@@ -73,6 +79,7 @@ install_deps() {
 check_deps() {
     detect_session
     command -v pdftoppm &>/dev/null || return 1
+    command -v pdfinfo &>/dev/null || return 1
     command -v python3 &>/dev/null || return 1
 
     if [ "$SESSION_TYPE" = "wayland" ]; then
@@ -80,32 +87,37 @@ check_deps() {
     else
         command -v xclip &>/dev/null || return 1
     fi
-    return 0
 }
 
+# ------------------------------------------------------------------------------
+# SESSION MANAGEMENT
+# ------------------------------------------------------------------------------
+
 save_session() {
-  local dir
+    local dir
     dir="$(realpath "$1")" || exit 1
 
     grep -q "|$dir$" "$SESSION_FILE" && {
-      echo -e "${YELLOW}Already saved.${NC}"
+        echo -e "${YELLOW}Already saved.${NC}"
         return
     }
 
-    id=$(( $(cut -d'|' -f1 "$SESSION_FILE" 2>/dev/null | sort -n | tail -1) + 1 ))
+    local last_id
+    last_id=$(cut -d'|' -f1 "$SESSION_FILE" | sort -n | tail -1)
+    local id=$(( ${last_id:-0} + 1 ))
+
     echo "$id|$dir" >> "$SESSION_FILE"
     echo -e "${GREEN}[OK]${NC} Saved: $dir"
 }
 
 delete_session() {
     [ ! -s "$SESSION_FILE" ] && {
-        echo "No sessions."
+        echo -e "${YELLOW}No sessions.${NC}"
         return
     }
 
     cat "$SESSION_FILE"
-    echo "Enter ID to delete:"
-    read -p "> " id
+    read -rp "Enter ID to delete: " id
 
     sed -i "/^$id|/d" "$SESSION_FILE"
     echo -e "${GREEN}[OK]${NC} Deleted session $id"
@@ -123,18 +135,20 @@ load_menu() {
         printf "${GREEN}[%d]${NC} %s\n" "$id" "$path"
     done < "$SESSION_FILE"
 
-    echo "Select ID (q=exit):"
-    read -p "> " sel
+    read -rp "Select ID (q=exit): " sel
     [[ "$sel" == "q" ]] && exit 0
 
+    local path
     path=$(grep "^$sel|" "$SESSION_FILE" | cut -d'|' -f2)
+
     [ -z "$path" ] && {
-        echo "Invalid selection"
+        echo -e "${RED}Invalid selection${NC}"
         exit 1
     }
 
     work_loop "$path"
 }
+
 # ------------------------------------------------------------------------------
 # CORE
 # ------------------------------------------------------------------------------
@@ -144,9 +158,8 @@ python3 - <<'EOF'
 import os, re
 files = [f for f in os.listdir('.') if f.lower().endswith('.pdf')]
 files.sort(key=lambda x: [int(c) if c.isdigit() else c.lower()
-                           for c in re.split(r'(\d+)', x)])
-for f in files:
-    print(f)
+                          for c in re.split(r'(\d+)', x)])
+print("\n".join(files))
 EOF
 }
 
@@ -158,50 +171,76 @@ copy_image() {
     fi
 }
 
+
+
 process_page() {
     local file="$1"
     local page="$2"
-    local flag="$3"
+    local flag="${3:-}"
     local action
 
     action=$(cut -d= -f2 "$SETTINGS_FILE")
     [[ "$flag" == "-s" ]] && action="save"
     [[ "$flag" == "-c" ]] && action="copy"
 
+    local max_page
+    max_page=$(pdfinfo "$file" | awk '/^Pages:/ {print $2}')
+
+    if (( page < 1 || page > max_page )); then
+        echo -e "${RED}Invalid page number (1-$max_page)${NC}"
+        return
+    fi
+
+    local tmp png
+    tmp="$(mktemp -d)"
+
+    pdftoppm -png -f "$page" -l "$page" -r 300 "$file" "$tmp/out"
+
+    png="$(find "$tmp" -maxdepth 1 -name 'out-*.png' | head -n1)"
+
+    if [ ! -f "$png" ]; then
+        echo -e "${RED}Render failed${NC}"
+        rm -rf "$tmp"
+        return
+    fi
+
     if [ "$action" = "copy" ]; then
-        pdftoppm -png -f "$page" -l "$page" -r 300 "$file" | copy_image
+        copy_image < "$png"
         echo -e "${GREEN}[OK]${NC} Copied to clipboard"
     else
+        local base out
         base=$(basename "$file" .pdf)
         out="$SAVE_DIR/${base}_p${page}.png"
-        pdftoppm -png -f "$page" -l "$page" -r 300 "$file" > "$out"
+        mv "$png" "$out"
         echo -e "${GREEN}[OK]${NC} Saved: $out"
     fi
-}
 
+    rm -rf "$tmp"
+}
 work_loop() {
-    cd "$(realpath "$1")" || exit
+    cd "$(realpath "$1")" || exit 1
 
     while true; do
         mapfile -t pdfs < <(get_sorted_files)
-        [ ${#pdfs[@]} -eq 0 ] && { echo -e "${RED}No PDFs found${NC}"; return; }
+        [ ${#pdfs[@]} -eq 0 ] && {
+            echo -e "${RED}No PDFs found${NC}"
+            return
+        }
 
         echo -e "\n${CYAN}Available PDFs:${NC}"
         for i in "${!pdfs[@]}"; do
             printf "${GREEN}[%d]${NC} %s\n" "$((i+1))" "${pdfs[$i]}"
         done
 
-        echo -e "${YELLOW}Select PDF (q=exit):${NC}"
-        read -p "> " sel
+        read -rp "Select PDF (q=exit): " sel
         [[ "$sel" == "q" ]] && return
+        [[ ! "$sel" =~ ^[0-9]+$ ]] && continue
 
-        selected="${pdfs[$((sel-1))]}" || continue
+        local selected="${pdfs[$((sel-1))]}"
         echo -e "${BLUE}Selected:${NC} $selected"
 
         while true; do
-            echo -e "${YELLOW}Enter page (q=back):${NC}"
-            read -p "> " raw
-            read -r page flag <<< "$raw"
+            read -rp "Enter page [n [-c|-s]] (q=back): " page flag
             [[ "$page" == "q" ]] && break
             [[ "$page" =~ ^[0-9]+$ ]] || continue
             process_page "$selected" "$page" "$flag"
@@ -214,33 +253,35 @@ work_loop() {
 # ------------------------------------------------------------------------------
 
 detect_session
-check_deps || echo -e "${YELLOW}[WARN] Missing dependencies. Run install manually.${NC}"
 
-case "$1" in
-    "-d")
-        delete_session
-        ;;
-    "-s")
-        shift
-        save_session "$@"
-        ;;
+if ! check_deps; then
+    echo -e "${YELLOW}[WARN] Missing dependencies.${NC}"
+    echo "Run: pdfs --install"
+    exit 1
+fi
+
+case "${1:-}" in
+    "-d") delete_session ;;
+    "-s") save_session "$2" ;;
     "-default")
         echo "1) Copy  2) Save"
-        read -p "> " c
+        read -rp "> " c
         [ "$c" = "1" ] && echo "mode=copy" > "$SETTINGS_FILE"
         [ "$c" = "2" ] && echo "mode=save" > "$SETTINGS_FILE"
         ;;
+    "--install") install_deps ;;
     "-h")
-        echo "Usage: pdfs [-s dir] [-d] [-default]"
+        echo "Usage:"
+        echo "  pdfs            -> session menu"
+        echo "  pdfs DIR        -> open directory"
+        echo "  pdfs -s DIR     -> save session"
+        echo "  pdfs -d         -> delete session"
+        echo "  pdfs -default   -> set default mode"
         ;;
     "")
         load_menu
         ;;
     *)
-        if [ -d "$*" ]; then
-            work_loop "$*"
-        else
-            echo -e "${RED}Invalid path.${NC}"
-        fi
+        [ -d "$1" ] && work_loop "$1" || echo -e "${RED}Invalid path${NC}"
         ;;
 esac
